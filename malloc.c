@@ -57,8 +57,11 @@ int __grow_freelist() {
 
 // 2. handle splitting chunk to reduce internal fragmantation
 void* my_malloc(size_t size) {
-    pthread_mutex_lock(&__freelist.mu);
+    if (!size) {
+        return NULL;
+    }
 
+    pthread_mutex_lock(&__freelist.mu);
     if (__freelist.head == NULL) {
         if (!__grow_freelist()) {
             errno = ENOMEM;
@@ -69,7 +72,7 @@ void* my_malloc(size_t size) {
 
     struct mchunk_hdr* prev;
     struct mchunk_hdr* merge_head;
-    struct mchunk_hdr* merge_head_ancestor;
+    struct mchunk_hdr* merge_head_prev;
     size_t acc_size = 0;
     for (struct mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
         if (curr->size >= size) {
@@ -81,12 +84,12 @@ void* my_malloc(size_t size) {
 
             curr->flags |= USED;
             pthread_mutex_unlock(&__freelist.mu);
-            return (char*)curr + CHUNK_HDR_SIZE;
+            return curr + 1;
         } 
 
         // try merging adjacent chunks
         if (merge_head == NULL) {
-            merge_head_ancestor = prev;
+            merge_head_prev = prev;
             merge_head = curr;
             acc_size += curr->size;
             continue;
@@ -95,7 +98,7 @@ void* my_malloc(size_t size) {
         if ((char*)prev + CHUNK_HDR_SIZE + prev->size != (char*)curr) {
             // replace merge head since a non adjacent chunk found in the way
             acc_size = 0;
-            merge_head_ancestor = prev;
+            merge_head_prev = prev;
             merge_head = curr;
             acc_size += curr->size;
             continue;
@@ -103,18 +106,18 @@ void* my_malloc(size_t size) {
 
         acc_size += curr->size + CHUNK_HDR_SIZE;
         if (acc_size >= size) {
-            // found enough chunks to coalesce 
+            // found enough chunks to merge 
             merge_head->size = acc_size;
             merge_head->flags |= USED;
 
-            if (merge_head_ancestor == NULL) {
+            if (merge_head_prev == NULL) {
                 __freelist.head = curr->next;
             } else {
-                merge_head_ancestor->next = curr->next;
+                merge_head_prev->next = curr->next;
             }
 
             pthread_mutex_unlock(&__freelist.mu);
-            return (char*)merge_head + CHUNK_HDR_SIZE;
+            return merge_head + 1;
         }
         
         prev = curr;
@@ -125,7 +128,7 @@ void* my_malloc(size_t size) {
 }
 
 void* my_free(void* ptr) {    
-    struct mchunk_hdr* hdr = (struct mchunk_hdr*)((char*)ptr - CHUNK_HDR_SIZE);
+    struct mchunk_hdr* hdr = (struct mchunk_hdr*)ptr - 1;
     if (hdr->flags >> 1 == FREE) {
         // chunk is already freed
         exit(1);
