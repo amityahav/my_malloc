@@ -2,11 +2,11 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
+#include <math.h>
 #include <pthread.h>
 
 typedef struct mchunk_hdr {
-    // 0 bit - USED/FREE chunk
-    u_int8_t flags;
+    u_int8_t used;
     size_t size;
     struct mchunk_hdr* next;
 } mchunk_hdr;
@@ -17,8 +17,8 @@ typedef struct freelist {
     pthread_mutex_t mu;
 } freelist;
 
-#define HEAP_CAP 64 * 1024 // 64 KB
-#define INITIAL_CHUNK_SIZE 64 // 64 B
+#define HEAP_CAP 128 * 1024 // 128 KB
+#define INITIAL_CHUNK_SIZE 128 // 128 B
 #define CHUNK_HDR_SIZE sizeof(mchunk_hdr)
 #define USED 1
 #define FREE 0
@@ -28,9 +28,14 @@ struct freelist __freelist = {
     .head = NULL
 };
 
-int __grow_freelist() {
-    void* base = sbrk(HEAP_CAP);
-    if ((uint32_t)base == -1 && errno == ENOMEM) {
+// TODO: handle the case when the list is not empty but has not 
+// enough memory for the request so it needs to be grown as well
+int __grow_freelist(int size) {
+    // grow freelist in multiples of HEAP_CAP
+    // with respect to the requested memory amount
+    size = ceil((double) size / HEAP_CAP) * HEAP_CAP;
+    void* base = sbrk(size);
+    if ((intptr_t)base == -1 && errno == ENOMEM) {
         return 0;
     }
 
@@ -41,21 +46,21 @@ int __grow_freelist() {
     };
     struct mchunk_hdr* prev = &dummy_head;
 
-    for (int i = 0; i < HEAP_CAP / INITIAL_CHUNK_SIZE; i++) {
+    for (int i = 0; i < size / INITIAL_CHUNK_SIZE; i++) {
         struct mchunk_hdr* curr = (struct mchunk_hdr*)chunk;
         curr->size = INITIAL_CHUNK_SIZE - CHUNK_HDR_SIZE;
+        curr->used = FREE;
         prev->next = curr;
         prev = curr;
         chunk += INITIAL_CHUNK_SIZE;
     }
 
-    __freelist.size += HEAP_CAP;
+    __freelist.size += size;
     __freelist.head = (struct mchunk_hdr*)base;
 
     return 1;
 }
 
-// 2. handle splitting chunk to reduce internal fragmantation
 void* my_malloc(size_t size) {
     if (!size) {
         return NULL;
@@ -63,7 +68,9 @@ void* my_malloc(size_t size) {
 
     pthread_mutex_lock(&__freelist.mu);
     if (__freelist.head == NULL) {
-        if (!__grow_freelist()) {
+        // grow freelist at first allocation request or
+        // when the user allocated all of the existing chunks
+        if (!__grow_freelist(size)) {
             errno = ENOMEM;
             pthread_mutex_unlock(&__freelist.mu);
             return NULL;
@@ -76,13 +83,23 @@ void* my_malloc(size_t size) {
     size_t acc_size = 0;
     for (struct mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
         if (curr->size >= size) {
+            // split chunk in order to reduce internal fragmantation
+            while (curr->size >> 1 >= size && curr->size >> 1 > CHUNK_HDR_SIZE) {
+                curr->size >>= 1;
+                struct mchunk_hdr* new_chunk = (struct mchunk_hdr*)((char*)(curr + 1) + curr->size);
+                new_chunk->used = FREE;
+                new_chunk->size = curr->size - CHUNK_HDR_SIZE;
+                new_chunk->next = curr->next;
+                curr->next = new_chunk;
+            }
+
             if (prev == NULL) {
                 __freelist.head = __freelist.head->next;
             } else {
                 prev->next = curr->next;
             }
 
-            curr->flags |= USED;
+            curr->used = USED;
             pthread_mutex_unlock(&__freelist.mu);
             return curr + 1;
         } 
@@ -108,7 +125,7 @@ void* my_malloc(size_t size) {
         if (acc_size >= size) {
             // found enough chunks to merge 
             merge_head->size = acc_size;
-            merge_head->flags |= USED;
+            merge_head->used = USED;
 
             if (merge_head_prev == NULL) {
                 __freelist.head = curr->next;
@@ -129,12 +146,12 @@ void* my_malloc(size_t size) {
 
 void* my_free(void* ptr) {    
     struct mchunk_hdr* hdr = (struct mchunk_hdr*)ptr - 1;
-    if (hdr->flags >> 1 == FREE) {
+    if (hdr->used == FREE) {
         // chunk is already freed
         exit(1);
     }
 
-    hdr->flags ^= FREE;
+    hdr->used = FREE;
 
     pthread_mutex_lock(&__freelist.mu);
 
