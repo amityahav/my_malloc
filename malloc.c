@@ -8,24 +8,26 @@
 typedef struct mchunk_hdr {
     u_int8_t used;
     size_t size;
+    struct mchunk_hdr* prev;
     struct mchunk_hdr* next;
 } mchunk_hdr;
 
 typedef struct freelist {
-    size_t size;
+    size_t available;
     mchunk_hdr* head;
+    mchunk_hdr* tail;
     pthread_mutex_t mu;
 } freelist;
 
 #define HEAP_CAP 128 * 1024 // 128 KB
-#define INITIAL_CHUNK_SIZE 128 // 128 B
 #define CHUNK_HDR_SIZE sizeof(mchunk_hdr)
 #define USED 1
 #define FREE 0
 
 struct freelist __freelist = {
-    .size = 0,
-    .head = NULL
+    .available = 0,
+    .head = NULL,
+    .tail = NULL
 };
 
 // TODO: handle the case when the list is not empty but has not 
@@ -33,43 +35,49 @@ struct freelist __freelist = {
 int __grow_freelist(int size) {
     // grow freelist in multiples of HEAP_CAP
     // with respect to the requested memory amount
-    size = ceil((double) size / HEAP_CAP) * HEAP_CAP;
+    size = ceil((double) size / HEAP_CAP) * HEAP_CAP * 2;
     void* base = sbrk(size);
     if ((intptr_t)base == -1 && errno == ENOMEM) {
         return 0;
     }
 
-    char* chunk = (char*)base;
-    struct mchunk_hdr dummy_head = {
-        .size = 0,
-        .next = (struct mchunk_hdr*)base
-    };
-    struct mchunk_hdr* prev = &dummy_head;
-
-    for (int i = 0; i < size / INITIAL_CHUNK_SIZE; i++) {
-        struct mchunk_hdr* curr = (struct mchunk_hdr*)chunk;
-        curr->size = INITIAL_CHUNK_SIZE - CHUNK_HDR_SIZE;
-        curr->used = FREE;
-        prev->next = curr;
-        prev = curr;
-        chunk += INITIAL_CHUNK_SIZE;
+    struct mchunk_hdr* new_chunk = (struct mchunk_hdr*)base;
+    new_chunk->used = FREE;
+    new_chunk->size = size - CHUNK_HDR_SIZE;
+    new_chunk->prev = __freelist.tail;
+    if (__freelist.tail != NULL) {
+        __freelist.tail->next = new_chunk;
     }
 
-    __freelist.size += size;
-    __freelist.head = (struct mchunk_hdr*)base;
+    __freelist.tail = new_chunk;
+
+    if (__freelist.head == NULL) {
+        __freelist.head = new_chunk;
+    }
+
+    __freelist.available += new_chunk->size;
+    
+    // try merge backward
+    if (__freelist.tail->prev != NULL && 
+    (char*)__freelist.tail - __freelist.tail->prev->size - CHUNK_HDR_SIZE == (char*)__freelist.tail->prev) {
+        __freelist.tail->prev->size += __freelist.tail->size + CHUNK_HDR_SIZE;
+        __freelist.tail = __freelist.tail->prev;
+        __freelist.tail->next = NULL;
+        __freelist.available += CHUNK_HDR_SIZE;
+    }
 
     return 1;
 }
 
 void* my_malloc(size_t size) {
-    if (!size) {
+    if (size <= 0) {
         return NULL;
     }
 
     pthread_mutex_lock(&__freelist.mu);
-    if (__freelist.head == NULL) {
-        // grow freelist at first allocation request or
-        // when the user allocated all of the existing chunks
+    if (__freelist.available < size) {
+        // grow freelist whenever there is not enough memory 
+        // for the request
         if (!__grow_freelist(size)) {
             errno = ENOMEM;
             pthread_mutex_unlock(&__freelist.mu);
@@ -78,9 +86,6 @@ void* my_malloc(size_t size) {
     }
 
     struct mchunk_hdr* prev;
-    struct mchunk_hdr* merge_head;
-    struct mchunk_hdr* merge_head_prev;
-    size_t acc_size = 0;
     for (struct mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
         if (curr->size >= size) {
             // split chunk in order to reduce internal fragmantation
@@ -91,6 +96,7 @@ void* my_malloc(size_t size) {
                 new_chunk->size = curr->size - CHUNK_HDR_SIZE;
                 new_chunk->next = curr->next;
                 curr->next = new_chunk;
+                __freelist.available -= CHUNK_HDR_SIZE;
             }
 
             if (prev == NULL) {
@@ -101,44 +107,11 @@ void* my_malloc(size_t size) {
 
             curr->used = USED;
             curr->next = NULL;
+            __freelist.available -= curr->size;
             pthread_mutex_unlock(&__freelist.mu);
             return curr + 1;
         } 
 
-        // try merging adjacent chunks
-        if (merge_head == NULL) {
-            merge_head_prev = prev;
-            merge_head = curr;
-            acc_size += curr->size;
-            continue;
-        }
-
-        if ((char*)prev + CHUNK_HDR_SIZE + prev->size != (char*)curr) {
-            // replace merge head since a non adjacent chunk found on the way
-            acc_size = 0;
-            merge_head_prev = prev;
-            merge_head = curr;
-            acc_size += curr->size;
-            continue;
-        }
-
-        acc_size += curr->size + CHUNK_HDR_SIZE;
-        if (acc_size >= size) {
-            // found enough chunks to merge 
-            merge_head->size = acc_size;
-            merge_head->used = USED;
-            merge_head->next = NULL;
-
-            if (merge_head_prev == NULL) {
-                __freelist.head = curr->next;
-            } else {
-                merge_head_prev->next = curr->next;
-            }
-
-            pthread_mutex_unlock(&__freelist.mu);
-            return merge_head + 1;
-        }
-        
         prev = curr;
     }
 
@@ -154,33 +127,91 @@ void* my_free(void* ptr) {
     }
 
     hdr->used = FREE;
+    hdr->next = NULL;
+    hdr-> prev = NULL;
+    __freelist.available += hdr->size;
 
     pthread_mutex_lock(&__freelist.mu);
-
-    struct mchunk_hdr* prev;
+    
+    int found = 0;
     for (struct mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
         if (hdr < curr) {
-            if (prev == NULL) {
+            if (curr == __freelist.head) {
                 // to be freed chunk is the first chunk in the freelist
                 hdr->next = __freelist.head;
+                __freelist.head->prev = hdr;
                 __freelist.head = hdr;
             } else {
-                hdr->next = prev->next;
-                prev->next = hdr;
+                hdr->next = curr;
+                curr->prev->next = hdr; 
+                hdr->prev = curr->prev;
+                curr->prev = hdr;
             }   
 
-            pthread_mutex_unlock(&__freelist.mu);
-            return NULL;
+            found = 1;
         }
-
-        prev = curr;
     }
 
-    if (prev == NULL) {
-        // freelist is empty
-        __freelist.head = hdr;
-    } else {
-        prev->next = hdr;
+    if (!found) {
+        if (__freelist.head == NULL) {
+            // freelist is empty
+            __freelist.head = hdr;
+            __freelist.tail = hdr;
+        } else {
+            // freed chunk is the tail of the freelist
+            __freelist.tail->next = hdr;
+            hdr->prev = __freelist.tail;
+            __freelist.tail = hdr;
+        }
+    }
+
+    // merge adjacent chunks if possible
+    int acc_fwd = hdr->size;
+    for (struct mchunk_hdr* curr = hdr->next; curr != NULL; curr = curr->next) {
+        if ((char*)curr - curr->prev->size - CHUNK_HDR_SIZE != (char*)curr->prev) {
+            hdr->next = curr;
+            hdr->size = acc_fwd;
+            curr->prev = hdr;
+            break;
+        }
+
+        acc_fwd += curr->size + CHUNK_HDR_SIZE;
+        __freelist.available += CHUNK_HDR_SIZE;
+
+        if (curr == __freelist.tail) {
+            hdr->next = NULL;
+            hdr->size = acc_fwd;
+            __freelist.tail = hdr;
+            break;
+        }
+    }
+
+    int acc_bck = hdr->size;
+    struct mchunk_hdr* bck_head = hdr;
+    for (struct mchunk_hdr* curr = hdr->prev; curr != NULL; curr = curr->prev) {
+        if ((char*)curr + curr->next->size + CHUNK_HDR_SIZE != (char*)curr->next) {
+            bck_head->size = acc_bck;
+            bck_head->next = hdr->next;
+            hdr->next->prev = bck_head;
+            break;
+        }
+
+        bck_head = curr;
+        acc_bck += bck_head->size + CHUNK_HDR_SIZE;
+        __freelist.available += CHUNK_HDR_SIZE;
+
+        if (bck_head == __freelist.head) {
+            bck_head->size = acc_bck;
+            break;
+        }
+    }
+
+    if (bck_head != hdr) {
+        // we've merged backwards
+        bck_head->next = hdr->next;
+        if (hdr->next != NULL) {
+            hdr->next->prev = bck_head;
+        }
     }
 
     pthread_mutex_unlock(&__freelist.mu);
