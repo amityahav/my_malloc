@@ -100,6 +100,7 @@ void* my_malloc(size_t size) {
             }
 
             curr->used = USED;
+            curr->next = NULL;
             pthread_mutex_unlock(&__freelist.mu);
             return curr + 1;
         } 
@@ -113,7 +114,7 @@ void* my_malloc(size_t size) {
         }
 
         if ((char*)prev + CHUNK_HDR_SIZE + prev->size != (char*)curr) {
-            // replace merge head since a non adjacent chunk found in the way
+            // replace merge head since a non adjacent chunk found on the way
             acc_size = 0;
             merge_head_prev = prev;
             merge_head = curr;
@@ -126,6 +127,7 @@ void* my_malloc(size_t size) {
             // found enough chunks to merge 
             merge_head->size = acc_size;
             merge_head->used = USED;
+            merge_head->next = NULL;
 
             if (merge_head_prev == NULL) {
                 __freelist.head = curr->next;
