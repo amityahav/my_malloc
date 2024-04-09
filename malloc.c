@@ -71,54 +71,25 @@ void __split_chunk(mchunk_hdr* chunk, size_t size) {
 }
 
 void __merge_forward(mchunk_hdr* chunk) {
-    int acc_fwd = chunk->size;
-    for (struct mchunk_hdr* curr = chunk->next; curr != NULL; curr = curr->next) {
-        if ((char*)curr - curr->prev->size - CHUNK_HDR_SIZE != (char*)curr->prev) {
-            chunk->next = curr;
-            chunk->size = acc_fwd;
-            curr->prev = chunk;
-            break;
+    if (chunk->next && ((char*)chunk + CHUNK_HDR_SIZE + chunk->size == (char*)chunk->next)) {
+        chunk->size += chunk->next->size + CHUNK_HDR_SIZE;
+        if (chunk->next == __freelist.tail) {
+            __freelist.tail = chunk;
         }
 
-        acc_fwd += curr->size + CHUNK_HDR_SIZE;
-
-        if (curr == __freelist.tail) {
-            chunk->next = NULL;
-            chunk->size = acc_fwd;
-            __freelist.tail = chunk;
-            break;
+        chunk->next = chunk->next->next;
+        if (chunk->next) {
+            chunk->next->prev = chunk;
         }
     }
 }
 
 void __merge_backward(mchunk_hdr* chunk) {
-    int acc_bck = chunk->size;
-    struct mchunk_hdr* bck_head = chunk;
-    for (struct mchunk_hdr* curr = chunk->prev; curr != NULL; curr = curr->prev) {
-        if ((char*)curr + CHUNK_HDR_SIZE + curr->size != (char*)curr->next) {
-            bck_head->size = acc_bck;
-            bck_head->next = chunk->next;
-
-            if (chunk->next) {
-                chunk->next->prev = bck_head;
-            }
-            break;
-        }
-
-        bck_head = curr;
-        acc_bck += bck_head->size + CHUNK_HDR_SIZE;
-
-        if (bck_head == __freelist.head) {
-            bck_head->size = acc_bck;
-            break;
-        }
-    }
-
-    if (bck_head != chunk) {
-        // we've merged backwards
-        bck_head->next = chunk->next;
+    if (chunk->prev && ((char*)chunk - chunk->prev->size - CHUNK_HDR_SIZE == (char*)chunk->prev)) {
+        chunk->prev->size += CHUNK_HDR_SIZE + chunk->size;
+        chunk->prev->next = chunk->next;
         if (chunk->next) {
-            chunk->next->prev = bck_head;
+            chunk->next->prev = chunk->prev;
         }
     }
 }
@@ -282,16 +253,16 @@ int main(int argc, char **argv) {
     void *ptr3 = my_malloc(20);
     debug_freelist();
 
-    my_free(ptr2);
+    my_free(ptr);
     debug_freelist();
 
     void *ptr4 = my_malloc(120);
     debug_freelist();
 
-    my_free(ptr);
+    my_free(ptr3);
     debug_freelist();
 
-    my_free(ptr3);
+    my_free(ptr2);
     debug_freelist();
 
     my_free(ptr4);
