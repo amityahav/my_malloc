@@ -19,7 +19,6 @@ typedef struct freelist {
 } freelist;
 
 #define ALIGN8(x) (((x - 1) >> 3) << 3) + 8
-#define HEAP_CAP 128 * 1024 // 128 KB
 #define CHUNK_HDR_SIZE sizeof(mchunk_hdr)
 #define USED 1
 #define FREE 0
@@ -124,14 +123,32 @@ void __merge_backward(mchunk_hdr* chunk) {
     }
 }
 
+mchunk_hdr* __find_chunk_pos(mchunk_hdr* chunk) {
+    for (struct mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
+        if (chunk < curr) {
+            return curr;
+        }
+    }
+
+    return NULL;
+}
+
 int __grow_freelist(int size) {
-    // grow freelist in multiples of HEAP_CAP
+    // grow freelist in multiples of 128 KB
     // with respect to the requested memory amount
     size = ceil((double) size / ((128*1024))) * (128*1024) * 2;
     void* base = sbrk(size + CHUNK_HDR_SIZE);
     if (base == (void*)-1 && errno == ENOMEM) {
         return 0;
     }
+
+    void* new_base = sbrk(0);
+    if (new_base == (void*)-1) {
+        return 0;
+    }
+
+    size = (uintptr_t)new_base - (uintptr_t)base;
+    printf("%d", size);
 
     struct mchunk_hdr* new_chunk = (struct mchunk_hdr*)base;
     new_chunk->used = FREE;
@@ -171,6 +188,8 @@ void* my_malloc(size_t size) {
         if (chunk) {
             //split chunk in order to reduce internal fragmantation
             __split_chunk(chunk, s);
+
+            // remove chunk from the freelist
             if (chunk->next) {
                 chunk->next->prev = chunk->prev;
             }
@@ -211,54 +230,45 @@ void* my_malloc(size_t size) {
 }
 
 void my_free(void* ptr) {    
-    struct mchunk_hdr* hdr = (struct mchunk_hdr*)ptr - 1;
-    if (hdr->used == FREE) {
+    struct mchunk_hdr* chunk = (struct mchunk_hdr*)ptr - 1;
+    if (chunk->used == FREE) {
         // chunk is already freed
         return;
     }
 
-    hdr->used = FREE;
-    hdr->next = NULL;
-    hdr-> prev = NULL;
+    chunk->used = FREE;
 
     pthread_mutex_lock(&__freelist.mu);
     
-    // link the freed chunk 
-    int found = 0;
-    for (struct mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
-        if (hdr < curr) {
-            if (curr == __freelist.head) {
-                // to be freed chunk is the first chunk in the freelist
-                hdr->next = __freelist.head;
-                __freelist.head->prev = hdr;
-                __freelist.head = hdr;
-            } else {
-                hdr->next = curr;
-                curr->prev->next = hdr; 
-                hdr->prev = curr->prev;
-                curr->prev = hdr;
-            }   
-
-            found = 1;
-            break;
-        }
-    }
-
-    if (!found) {
+    // link the to-be-freed chunk 
+    mchunk_hdr* curr = __find_chunk_pos(chunk);
+    if (curr) {
+        if (curr == __freelist.head) {
+            // to-be -freed chunk is the first chunk in the freelist
+            chunk->next = __freelist.head;
+            __freelist.head->prev = chunk;
+            __freelist.head = chunk;
+        } else {
+            chunk->next = curr;
+            curr->prev->next = chunk; 
+            chunk->prev = curr->prev;
+            curr->prev = chunk;
+        }          
+    } else {
         if (!__freelist.head) {
             // freelist is empty
-            __freelist.head = hdr;
-            __freelist.tail = hdr;
+            __freelist.head = chunk;
+            __freelist.tail = chunk;
         } else {
             // freed chunk is the tail of the freelist
-            __freelist.tail->next = hdr;
-            hdr->prev = __freelist.tail;
-            __freelist.tail = hdr;
-        }
+            __freelist.tail->next = chunk;
+            chunk->prev = __freelist.tail;
+            __freelist.tail = chunk;
+        }        
     }
 
-    __merge_forward(hdr);
-    __merge_backward(hdr);
+    __merge_forward(chunk);
+    __merge_backward(chunk);
 
     pthread_mutex_unlock(&__freelist.mu);
     return;
@@ -274,19 +284,19 @@ int main(int argc, char **argv) {
     void *ptr3 = my_malloc(20);
     debug_freelist();
 
-    my_free(ptr);
-    debug_freelist();
-
     my_free(ptr2);
     debug_freelist();
 
     void *ptr4 = my_malloc(120);
     debug_freelist();
 
-    my_free(ptr4);
+    my_free(ptr);
     debug_freelist();
 
     my_free(ptr3);
+    debug_freelist();
+
+    my_free(ptr4);
     debug_freelist();
 
 }
