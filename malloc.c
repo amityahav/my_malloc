@@ -148,7 +148,6 @@ int __grow_freelist(int size) {
     }
 
     size = (uintptr_t)new_base - (uintptr_t)base;
-    printf("%d", size);
 
     struct mchunk_hdr* new_chunk = (struct mchunk_hdr*)base;
     new_chunk->used = FREE;
