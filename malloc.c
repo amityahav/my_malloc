@@ -209,7 +209,6 @@ void* my_malloc(size_t size) {
             chunk->prev = NULL;
 
             pthread_mutex_unlock(&__freelist.mu);
-            printf("allocated chunk: size: %lu\n", chunk->size);
             return chunk + 1;
         } 
 
