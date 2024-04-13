@@ -119,10 +119,13 @@ int __grow_freelist(int size) {
     }
 
     size = (uintptr_t)new_base - (uintptr_t)base;
+    if (size <= CHUNK_HDR_SIZE) {
+        return 0;
+    }
 
     struct mchunk_hdr* new_chunk = (struct mchunk_hdr*)base;
     new_chunk->used = FREE;
-    new_chunk->size = size;
+    new_chunk->size = size - CHUNK_HDR_SIZE;
     new_chunk->prev = __freelist.tail;
 
     if (__freelist.tail) {
