@@ -23,7 +23,7 @@ typedef struct freelist {
 #define USED 1
 #define FREE 0
 
-struct freelist __freelist = {
+freelist __freelist = {
     .head = NULL,
     .tail = NULL
 };
@@ -31,7 +31,7 @@ struct freelist __freelist = {
 void debug_freelist() {
     int i = 0;
     printf("------------------------\n");
-    for (struct mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
+    for (mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
         printf("CHUNK #%d: size: %lu\n", i, curr->size);
         i++;
     }
@@ -39,7 +39,7 @@ void debug_freelist() {
 }
 
 mchunk_hdr* __find_chunk(size_t size) {
-    for (struct mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
+    for (mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
         if (curr->size >= size) {
             return curr;
         }
@@ -53,7 +53,7 @@ void __split_chunk(mchunk_hdr* chunk, size_t size) {
     if (remaining_size > CHUNK_HDR_SIZE) {
         // we can split
         chunk->size = size;
-        struct mchunk_hdr* new_chunk = (struct mchunk_hdr*)((char*)(chunk + 1) + size);
+        mchunk_hdr* new_chunk = (mchunk_hdr*)((char*)(chunk + 1) + size);
         new_chunk->used = FREE;
         new_chunk->size = remaining_size - CHUNK_HDR_SIZE;
         new_chunk->next = chunk->next;
@@ -95,7 +95,7 @@ void __merge_backward(mchunk_hdr* chunk) {
 }
 
 mchunk_hdr* __find_chunk_pos(mchunk_hdr* chunk) {
-    for (struct mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
+    for (mchunk_hdr* curr = __freelist.head; curr != NULL; curr = curr->next) {
         if (chunk < curr) {
             return curr;
         }
@@ -123,7 +123,7 @@ int __grow_freelist(int size) {
         return 0;
     }
 
-    struct mchunk_hdr* new_chunk = (struct mchunk_hdr*)base;
+    mchunk_hdr* new_chunk = (mchunk_hdr*)base;
     new_chunk->used = FREE;
     new_chunk->size = size - CHUNK_HDR_SIZE;
     new_chunk->prev = __freelist.tail;
@@ -202,7 +202,7 @@ void* my_malloc(size_t size) {
 }
 
 void my_free(void* ptr) {    
-    struct mchunk_hdr* chunk = (struct mchunk_hdr*)ptr - 1;
+    mchunk_hdr* chunk = (mchunk_hdr*)ptr - 1;
     if (chunk->used == FREE) {
         // chunk is already freed
         return;
@@ -216,7 +216,7 @@ void my_free(void* ptr) {
     mchunk_hdr* curr = __find_chunk_pos(chunk);
     if (curr) {
         if (curr == __freelist.head) {
-            // to-be -freed chunk is the first chunk in the freelist
+            // to-be-freed chunk is the first chunk in the freelist
             chunk->next = __freelist.head;
             __freelist.head->prev = chunk;
             __freelist.head = chunk;
